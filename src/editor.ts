@@ -4,39 +4,69 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { HomeAssistant, fireEvent, LovelaceCardEditor } from 'custom-card-helpers';
 
 import { LogbookCardConfig } from './types';
-import { localize } from './localize/localize';
+import { localize, setHass } from './localize/localize';
+import { CARD_VERSION } from './const';
 
-const options = {
-  required: {
-    icon: 'tune',
-    name: localize('editor.required_option_name'),
-    secondary: localize('editor.required_option_name'),
-    show: true,
-  },
-  showOptions: {
-    icon: 'toggle-switch',
-    name: localize('editor.show_option_name'),
-    secondary: localize('editor.show_option_description'),
-    show: false,
-  },
-  appearance: {
-    icon: 'palette',
-    name: localize('editor.appearance_option_name'),
-    secondary: localize('editor.appearance_option_description'),
-    show: false,
-  },
+/**
+ * 动态构建选项对象 — 在 render 时调用，确保 localize() 能拿到正确的 hass 语言
+ * show 状态保存在独立的 _showState 中，与 label 翻译解耦
+ */
+type OptionKey = 'required' | 'showOptions' | 'appearance';
+const optionShowState: Record<OptionKey, boolean> = {
+  required: true,
+  showOptions: false,
+  appearance: false,
 };
+
+function buildOption(key: OptionKey) {
+  const configs: Record<OptionKey, { icon: string; nameKey: string; secondaryKey: string }> = {
+    required: {
+      icon: 'tune',
+      nameKey: 'editor.required_option_name',
+      secondaryKey: 'editor.required_option_description',
+    },
+    showOptions: {
+      icon: 'toggle-switch',
+      nameKey: 'editor.show_option_name',
+      secondaryKey: 'editor.show_option_description',
+    },
+    appearance: {
+      icon: 'palette',
+      nameKey: 'editor.appearance_option_name',
+      secondaryKey: 'editor.appearance_option_description',
+    },
+  };
+  const cfg = configs[key];
+  return {
+    icon: cfg.icon,
+    name: localize(cfg.nameKey),
+    secondary: localize(cfg.secondaryKey),
+    show: optionShowState[key],
+  };
+}
 
 @customElement('logbook-card-editor')
 export class LogbookCardEditor extends LitElement implements LovelaceCardEditor {
-  @property({ attribute: false }) public hass?: HomeAssistant;
+  @property({ attribute: false })
+  public set hass(value: HomeAssistant | undefined) {
+    // 缓存 hass 引用到 localize 模块，让它能读取 HA 的语言设置
+    if (value) {
+      setHass(value);
+    }
+    (this as any)._hass = value;
+    this.requestUpdate('hass', (this as any)._prevHass);
+    (this as any)._prevHass = value;
+  }
+  public get hass(): HomeAssistant | undefined {
+    return (this as any)._hass;
+  }
+
   @state() private _config?: Partial<LogbookCardConfig>;
   @state() private _toggle?: boolean;
   @state() private _helpers?: any;
 
   public setConfig(config: LogbookCardConfig): void {
     this._config = config;
-
     this.loadCardHelpers();
   }
 
@@ -44,7 +74,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.title || '';
     }
-
     return '';
   }
 
@@ -52,7 +81,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.entity || '';
     }
-
     return '';
   }
 
@@ -60,7 +88,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.hours_to_show || '';
     }
-
     return 5;
   }
 
@@ -68,7 +95,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.desc !== undefined) {
       return this._config.desc;
     }
-
     return true;
   }
 
@@ -76,7 +102,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.date_format || '';
     }
-
     return '';
   }
 
@@ -84,7 +109,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.no_event || '';
     }
-
     return '';
   }
 
@@ -92,7 +116,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.max_items || -1;
     }
-
     return -1;
   }
 
@@ -100,7 +123,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config) {
       return this._config.collapse;
     }
-
     return undefined;
   }
 
@@ -108,7 +130,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.state;
     }
-
     return DEFAULT_SHOW.state;
   }
 
@@ -116,7 +137,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.duration;
     }
-
     return DEFAULT_SHOW.duration;
   }
 
@@ -124,7 +144,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.start_date;
     }
-
     return DEFAULT_SHOW.start_date;
   }
 
@@ -132,7 +151,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.end_date;
     }
-
     return DEFAULT_SHOW.end_date;
   }
 
@@ -140,7 +158,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.icon;
     }
-
     return DEFAULT_SHOW.icon;
   }
 
@@ -148,7 +165,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (this._config && this._config.show) {
       return this._config.show?.separator;
     }
-
     return DEFAULT_SHOW.separator;
   }
 
@@ -161,43 +177,38 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       return html``;
     }
 
-    // You can restrict on domain type
-    const entities = Object.keys(this.hass.states).sort();
+    // render 时动态构建选项，确保 localize() 能读取到正确的语言
+    const required = buildOption('required');
+    const appearance = buildOption('appearance');
+    const showOptions = buildOption('showOptions');
 
     return html`
       <div class="card-config">
         <div class="option" @click=${this._toggleOption} .option=${'required'}>
-          <ha-icon class="option-icon" .icon=${`mdi:${options.required.icon}`}></ha-icon>
-          <div class="option-title">${options.required.name}</div>
-          <div class="option-secondary">${options.required.secondary}</div>
+          <ha-icon class="option-icon" .icon=${`mdi:${required.icon}`}></ha-icon>
+          <div class="option-title">${required.name}</div>
+          <div class="option-secondary">${required.secondary}</div>
         </div>
-        ${options.required.show
+        ${required.show
           ? html`
               <div class="values">
-                <ha-select
-                  naturalMenuWidth
-                  fixedMenuPosition
+                <ha-entity-picker
+                  .hass=${this.hass}
                   .label=${localize('editor.entity_label')}
                   .configValue=${'entity'}
                   .value=${this._entity}
-                  @selected=${this._valueChanged}
-                  @closed=${ev => ev.stopPropagation()}
-                >
-                  ${entities.map(entity => {
-                    return html`
-                      <mwc-list-item .value=${entity}>${entity}</mwc-list-item>
-                    `;
-                  })}
-                </ha-select>
+                  .allowCustomEntity=${false}
+                  @value-changed=${this._valueChanged}
+                ></ha-entity-picker>
               </div>
             `
           : ''}
         <div class="option" @click=${this._toggleOption} .option=${'appearance'}>
-          <ha-icon class="option-icon" .icon=${`mdi:${options.appearance.icon}`}></ha-icon>
-          <div class="option-title">${options.appearance.name}</div>
-          <div class="option-secondary">${options.appearance.secondary}</div>
+          <ha-icon class="option-icon" .icon=${`mdi:${appearance.icon}`}></ha-icon>
+          <div class="option-title">${appearance.name}</div>
+          <div class="option-secondary">${appearance.secondary}</div>
         </div>
-        ${options.appearance.show
+        ${appearance.show
           ? html`
               <div class="values">
                 <ha-textfield
@@ -255,14 +266,14 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
             `
           : ''}
         <div class="option" @click=${this._toggleOption} .option=${'showOptions'}>
-          <ha-icon class="option-icon" .icon=${`mdi:${options.showOptions.icon}`}></ha-icon>
-          <div class="option-title">${options.showOptions.name}</div>
-          <div class="option-secondary">${options.showOptions.secondary}</div>
+          <ha-icon class="option-icon" .icon=${`mdi:${showOptions.icon}`}></ha-icon>
+          <div class="option-title">${showOptions.name}</div>
+          <div class="option-secondary">${showOptions.secondary}</div>
         </div>
-        ${options.showOptions.show
+        ${showOptions.show
           ? html`
               <div class="values">
-                <ha-formfield .label=${localize(`editor.display_state_label`)}>
+                <ha-formfield .label=${localize('editor.display_state_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of state ${this._show_state ? 'off' : 'on'}`}
                     .checked=${this._show_state !== false}
@@ -270,15 +281,15 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_duration_label`)}>
+                <ha-formfield .label=${localize('editor.display_duration_label')}>
                   <ha-switch
-                    aria-label=${`Toggle display of duration ${this._show_state ? 'off' : 'on'}`}
+                    aria-label=${`Toggle display of duration ${this._show_duration ? 'off' : 'on'}`}
                     .checked=${this._show_duration !== false}
                     .configValue=${'duration'}
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_start_date_label`)}>
+                <ha-formfield .label=${localize('editor.display_start_date_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of start date ${this._show_start_date ? 'off' : 'on'}`}
                     .checked=${this._show_start_date !== false}
@@ -286,7 +297,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_end_date_label`)}>
+                <ha-formfield .label=${localize('editor.display_end_date_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of end date ${this._show_end_date ? 'off' : 'on'}`}
                     .checked=${this._show_end_date !== false}
@@ -294,7 +305,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_icon_label`)}>
+                <ha-formfield .label=${localize('editor.display_icon_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of icon ${this._show_icon ? 'off' : 'on'}`}
                     .checked=${this._show_icon === true}
@@ -302,7 +313,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_separator_label`)}>
+                <ha-formfield .label=${localize('editor.display_separator_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of event separator ${this._show_separator ? 'off' : 'on'}`}
                     .checked=${this._show_separator !== false}
@@ -310,7 +321,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._showOptionChanged}
                   ></ha-switch>
                 </ha-formfield>
-                <ha-formfield .label=${localize(`editor.display_custom_logs_label`)}>
+                <ha-formfield .label=${localize('editor.display_custom_logs_label')}>
                   <ha-switch
                     aria-label=${`Toggle display of custom logs ${this._custom_logs ? 'off' : 'on'}`}
                     .checked=${this._custom_logs !== false}
@@ -326,6 +337,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       <p class="note">
         ${localize('editor.note')}
       </p>
+      <p class="version">logbook-card v${CARD_VERSION}</p>
     `;
   }
 
@@ -333,16 +345,18 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     this._helpers = await (window as any).loadCardHelpers();
   }
 
-  private _toggleOption(ev): void {
-    this._toggleThing(ev, options);
-  }
-
-  private _toggleThing(ev, optionList): void {
-    const show = !optionList[ev.target.option].show;
-    for (const [key] of Object.entries(optionList)) {
-      optionList[key].show = false;
-    }
-    optionList[ev.target.option].show = show;
+  private _toggleOption(ev: Event): void {
+    // 用 currentTarget 替代 target，确保拿到绑定了 .option 属性的父元素
+    // CSS 的 pointer-events: none 让子元素不接收点击，但 currentTarget 更可靠
+    const target = ev.currentTarget as HTMLElement;
+    if (!target || !target.option) return;
+    const key = target.option as OptionKey;
+    const show = !optionShowState[key];
+    // 先全部关闭
+    (['required', 'showOptions', 'appearance'] as OptionKey[]).forEach(k => {
+      optionShowState[k] = false;
+    });
+    optionShowState[key] = show;
     this._toggle = !this._toggle;
   }
 
@@ -437,6 +451,12 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       }
       .note {
         font-weight: bold;
+      }
+      .version {
+        font-size: 0.75rem;
+        color: var(--secondary-text-color);
+        text-align: right;
+        margin-top: 0.5rem;
       }
     `;
   }

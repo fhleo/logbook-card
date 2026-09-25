@@ -1,0 +1,50 @@
+{
+  "common": {
+    "version": "版本",
+    "default_no_event": "此时间段内没有事件",
+    "invalid_configuration": "配置无效",
+    "show_warning": "显示警告",
+    "invalid_max_items": "max_items 必须是整数",
+    "invalid_desc": "desc 必须是布尔值",
+    "invalid_collapse": "collapse 必须是正整数",
+    "invalid_minimal_duration": "minimal_duration 必须是正整数",
+    "invalid_duration_units": "duration.units 必须是数组",
+    "invalid_duration_largest": "duration.largest 必须是整数或 `full`",
+    "collapse_greater_than_max_items": "collapse 必须小于 max-items"
+  },
+  "logbook_card": {
+    "default_title": "{entity} 历史记录",
+    "missing_entity": "请定义一个实体",
+    "invalid_hidden_date": "hidden_state 必须是数组",
+    "invalid_state_map": "state_map 必须是数组",
+    "invalid_custom_log_map": "custom_log_map 必须是数组",
+    "invalid_attributes": "attributes 必须是数组"
+  },
+  "multiple_logbook_card": {
+    "missing_entities": "请在 entities 中至少定义一个实体"
+  },
+  "editor": {
+    "required_option_name": "必填",
+    "required_option_description": "此卡片的必填选项",
+    "show_option_name": "显示",
+    "show_option_description": "自定义要显示的内容",
+    "appearance_option_name": "外观",
+    "appearance_option_description": "自定义标题、显示的事件数量等...",
+    "entity_label": "实体（必填）",
+    "title_label": "标题（可选）",
+    "hours_to_show_label": "显示小时数",
+    "max_items_label": "最大条目数：显示的最大事件数（-1 显示所有事件）",
+    "no_event_label": "无事件时显示的文本",
+    "collapse_label": "折叠：显示的条目数量。其余条目将在可展开区域中显示",
+    "date_format_label": "日期格式",
+    "desc_label": "按日期降序显示事件",
+    "display_state_label": "显示状态",
+    "display_duration_label": "显示持续时间",
+    "display_start_date_label": "显示开始日期",
+    "display_end_date_label": "显示结束日期",
+    "display_icon_label": "显示图标",
+    "display_separator_label": "显示分隔符",
+    "display_custom_logs_label": "显示自定义日志",
+    "note": "注意：hidden_state、duration_labels、attributes、separator_style、state_map 等参数仅可通过代码编辑器配置。"
+  }
+}

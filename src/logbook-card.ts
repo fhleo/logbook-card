@@ -10,7 +10,7 @@ import './logbook-date';
 import './logbook-duration';
 import { LogbookCardConfig, ExtendedHomeAssistant, HistoryOrCustomLogEvent } from './types';
 import { DEFAULT_SHOW, DEFAULT_SEPARATOR_STYLE, DEFAULT_DURATION } from './const';
-import { localize } from './localize/localize';
+import { localize, setHass } from './localize/localize';
 import { actionHandler } from './action-handler-directive';
 import { EntityCustomLogConfig, getCustomLogsPromise } from './custom-logs';
 import { EntityHistoryConfig, getHistory } from './history';
@@ -25,6 +25,13 @@ addCustomCard('logbook-card', 'Logbook Card', 'A custom card to display entity h
 
 @customElement('logbook-card')
 export class LogbookCard extends LogbookBaseCard {
+  protected willUpdate(changedProps: PropertyValues): void {
+    // hass 注入或变化时缓存，让 localize() 能读取 HA 的语言设置
+    if (changedProps.has('hass') && this.hass) {
+      setHass(this.hass);
+    }
+  }
+
   public static async getConfigElement(): Promise<LovelaceCardEditor> {
     return document.createElement('logbook-card-editor') as LogbookCardEditor;
   }

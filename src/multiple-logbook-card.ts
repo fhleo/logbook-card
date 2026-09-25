@@ -45,7 +45,7 @@ export class MultipleLogbookCard extends LogbookBaseCard {
   public setConfig(config: MultipleLogbookCardConfig): void {
     checkBaseConfig(config);
 
-    if (!config.entities && !Array.isArray(config.entities)) {
+    if (!config.entities || !Array.isArray(config.entities)) {
       throw new Error(localize('multiple_logbook_card.missing_entities'));
     }
 

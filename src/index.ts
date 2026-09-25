@@ -2,7 +2,6 @@
 import { CARD_VERSION } from './const';
 
 import './logbook-card';
-import './multiple-logbook-card';
 
 /* eslint no-console: 0 */
 console.info(
