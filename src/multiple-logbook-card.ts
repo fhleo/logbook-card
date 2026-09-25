@@ -28,6 +28,12 @@ addCustomCard(
   'A custom card to display history for multiple entities',
 );
 
+/**
+ * 模块级历史缓存：编辑器中每次 config-changed 都可能重建预览卡片实例，
+ * 新实例立即用缓存数据渲染（避免空白），后台再异步刷新。
+ */
+const multipleHistoryCache = new Map<string, { items: HistoryOrCustomLogEvent[]; changed: Date }>();
+
 @customElement('multiple-logbook-card')
 export class MultipleLogbookCard extends LogbookBaseCard {
   // Add any properties that should cause your element to re-render here
@@ -42,9 +48,25 @@ export class MultipleLogbookCard extends LogbookBaseCard {
 
   private lastHistoryChanged?: Date;
 
+  /** 影响历史数据的配置字段：仅这些字段变化时才重新拉取历史（样式/布局等纯展示配置变化时跳过） */
+  private static readonly DATA_KEYS: (keyof MultipleLogbookCardConfig)[] = [
+    'entities',
+    'hours_to_show',
+    'history',
+    'date_format',
+    'minimal_duration',
+    'show_history',
+    'desc',
+    'max_items',
+    'group_by_day',
+  ];
+
+  private dataSignature(config: MultipleLogbookCardConfig): string {
+    return JSON.stringify(MultipleLogbookCard.DATA_KEYS.map(key => config[key]));
+  }
+
   public setConfig(config: MultipleLogbookCardConfig): void {
     checkBaseConfig(config);
-
     if (!config.entities || !Array.isArray(config.entities)) {
       throw new Error(localize('multiple_logbook_card.missing_entities'));
     }
@@ -55,6 +77,7 @@ export class MultipleLogbookCard extends LogbookBaseCard {
 
     //Check for attributes / states / hidden_state
 
+    const prevData = this.config ? this.dataSignature(this.config) : undefined;
     this.config = {
       desc: true,
       max_items: -1,
@@ -84,7 +107,19 @@ export class MultipleLogbookCard extends LogbookBaseCard {
       duration_labels: { ...config.duration_labels },
       separator_style: { ...DEFAULT_SEPARATOR_STYLE, ...config.separator_style },
     };
-    this.updateHistory();
+
+    const sig = this.dataSignature(this.config);
+    // 命中缓存时立即恢复历史数据（预览卡片重建时避免空白），后台再异步刷新
+    const cached = multipleHistoryCache.get(sig);
+    if (cached) {
+      this.history = cached.items;
+      this.lastHistoryChanged = cached.changed;
+    }
+
+    // 数据相关配置未变化时跳过重新拉取历史（避免滑块等高频配置变更引发请求风暴）
+    if (!prevData || prevData !== sig) {
+      this.updateHistory();
+    }
   }
 
   updateHistory(): void {
@@ -137,16 +172,27 @@ export class MultipleLogbookCard extends LogbookBaseCard {
           this.history = allHistory;
 
           this.lastHistoryChanged = new Date();
+          // 写入模块级缓存（超出上限时淘汰最早条目），供预览卡片重建时立即渲染
+          const sig = this.dataSignature(this.config);
+          multipleHistoryCache.set(sig, { items: allHistory, changed: this.lastHistoryChanged });
+          if (multipleHistoryCache.size > 10) {
+            const oldest = multipleHistoryCache.keys().next().value;
+            if (oldest !== undefined) {
+              multipleHistoryCache.delete(oldest);
+            }
+          }
         });
       }
     }
   }
 
   protected shouldUpdate(changedProps: PropertyValues): boolean {
-    if (changedProps.has('history')) {
+    // history 或 config（样式/布局等）变化都重渲染，让样式调整即时生效
+    if (changedProps.has('history') || changedProps.has('config')) {
       return true;
     }
     changedProps.delete('history');
+    changedProps.delete('config');
     return false;
   }
 
@@ -159,9 +205,11 @@ export class MultipleLogbookCard extends LogbookBaseCard {
 
     return html`
       <ha-card tabindex="0">
-        <h1 aria-label=${`${this.config.title}`} class="card-header">
-          ${this.config.title}
-        </h1>
+        ${this.config.show_title === false || !this.config.title
+          ? ''
+          : html`
+              <h1 aria-label=${`${this.config.title}`} class="card-header">${this.config.title}</h1>
+            `}
         <div class="card-content ${contentCardClass} grid" style="[[contentStyle]]">
           ${this.renderHistory(this.history, this.config)}
         </div>

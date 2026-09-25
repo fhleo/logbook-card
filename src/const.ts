@@ -1,5 +1,5 @@
 import { ShowConfiguration, SeparatorStyleConfig, DurationConfig } from './types';
-export const CARD_VERSION = '0.0.1';
+export const CARD_VERSION = '0.4.3';
 
 export const DEFAULT_SHOW: ShowConfiguration = {
   state: true,
@@ -8,6 +8,7 @@ export const DEFAULT_SHOW: ShowConfiguration = {
   end_date: true,
   icon: true,
   separator: false,
+  time: true,
   entity_name: true,
 };
 

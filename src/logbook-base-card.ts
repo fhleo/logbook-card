@@ -6,12 +6,15 @@ import {
   Attribute,
   History,
   HistoryOrCustomLogEvent,
+  LayoutElementKey,
 } from './types';
+import { layoutRows } from './layout';
 import { property } from 'lit/decorators.js';
 import { handleAction, ActionHandlerEvent, hasAction } from 'custom-card-helpers';
 import { actionHandler } from './action-handler-directive';
 import { styleMap, StyleInfo } from 'lit/directives/style-map.js';
 import { isSameDay } from './date-helpers';
+import { displayTime } from './formatter';
 import { HassEntity } from 'home-assistant-js-websocket/dist/types';
 
 export abstract class LogbookBaseCard extends LitElement {
@@ -104,28 +107,91 @@ export abstract class LogbookBaseCard extends LitElement {
     );
   }
 
+  /** 读取某元素的用户样式覆盖（字体颜色/大小） */
+  protected elementStyleInfo(config: LogbookCardConfigBase, key: LayoutElementKey): StyleInfo {
+    const style = config?.element_styles?.[key];
+    const info: StyleInfo = {};
+    if (style?.color) {
+      info.color = style.color;
+    }
+    if (style?.font_size) {
+      info['font-size'] = style.font_size;
+    }
+    return info;
+  }
+
   protected renderHistoryItem(item: History, isLast: boolean, config: LogbookCardConfigBase): TemplateResult {
+    // 各元素的显示模板（未开启/无内容的元素不会加入）
+    const tpls = new Map<LayoutElementKey, TemplateResult>();
+    if (config?.show?.state) {
+      tpls.set(
+        'state',
+        html`
+          <span class="state" style=${styleMap(this.elementStyleInfo(config, 'state'))}>${item.label}</span>
+        `,
+      );
+    }
+    if (config?.show?.duration) {
+      tpls.set(
+        'duration',
+        html`
+          <span class="duration" style=${styleMap(this.elementStyleInfo(config, 'duration'))}>
+            <logbook-duration .hass="${this.hass}" .config="${config}" .duration="${item.duration}"> </logbook-duration>
+          </span>
+        `,
+      );
+    }
+    const attributes = item.attributes?.map(attr => this.renderAttributes(attr, config));
+    if (attributes?.length) {
+      tpls.set(
+        'attributes',
+        html`
+          ${attributes}
+        `,
+      );
+    }
+    const showTime = config?.show?.time !== false;
+    if (config?.show?.start_date || config?.show?.end_date || showTime) {
+      tpls.set('time', this.renderHistoryDate(item, config));
+    }
+    // 按行分组渲染：每行分左组与右组（右组靠行尾对齐）
+    const layoutPlan = layoutRows(config?.layout);
+    const entityTpl =
+      this.mode === 'multiple' && config.show?.entity_name
+        ? this.renderEntity(item.stateObj.entity_id, item.entity_name, config)
+        : undefined;
+    const rows = layoutPlan
+      .map(row => {
+        const renderKey = (key: LayoutElementKey): TemplateResult[] => {
+          // 实体名跟随状态，显示在状态之前
+          if (key === 'state' && entityTpl) {
+            return [entityTpl, tpls.get(key)].filter(Boolean) as TemplateResult[];
+          }
+          const tpl = tpls.get(key);
+          return tpl ? [tpl] : [];
+        };
+        const leftParts = row.left.flatMap(renderKey);
+        const rightParts = row.right.flatMap(renderKey);
+        if (leftParts.length === 0 && rightParts.length === 0) {
+          return null;
+        }
+        return html`
+          <div class="row">
+            ${leftParts}
+            ${rightParts.length
+              ? html`
+                  <div class="row-right">${rightParts}</div>
+                `
+              : ''}
+          </div>
+        `;
+      })
+      .filter(Boolean);
     return html`
       <div class="item history">
         ${this.renderHistoryIcon(item, config)}
         <div class="item-content">
-          ${this.mode === 'multiple' && config.show?.entity_name
-            ? this.renderEntity(item.stateObj.entity_id, item.entity_name, config)
-            : ''}
-          ${config?.show?.state
-            ? html`
-                <span class="state">${item.label}</span>
-              `
-            : html``}
-          ${config?.show?.duration
-            ? html`
-                <span class="duration">
-                  <logbook-duration .hass="${this.hass}" .config="${config}" .duration="${item.duration}">
-                  </logbook-duration>
-                </span>
-              `
-            : html``}
-          ${this.renderHistoryDate(item, config)}${item.attributes?.map(this.renderAttributes)}
+          ${rows}
         </div>
       </div>
       ${!isLast ? this.renderSeparator(config) : ``}
@@ -194,13 +260,17 @@ export abstract class LogbookBaseCard extends LitElement {
   }
 
   protected renderSeparator(config: LogbookCardConfigBase): TemplateResult | void {
-    const style: StyleInfo = {
+    const width = config?.separator_style?.width ?? 1;
+    const style = config?.separator_style?.style ?? 'solid';
+    // double 线型在 CSS 中需要至少 3px 才能渲染出双线效果
+    const effectiveWidth = style === 'double' && width < 3 ? 3 : width;
+    const styleInfo: StyleInfo = {
       border: '0',
-      'border-top': `${config?.separator_style?.width}px ${config?.separator_style?.style} ${config?.separator_style?.color}`,
+      'border-top': `${effectiveWidth}px ${style} ${config?.separator_style?.color}`,
     };
     if (config?.show?.separator) {
       return html`
-        <hr class="separator" style=${styleMap(style)} aria-hidden="true" />
+        <hr class="separator" style=${styleMap(styleInfo)} aria-hidden="true" />
       `;
     }
   }
@@ -220,9 +290,18 @@ export abstract class LogbookBaseCard extends LitElement {
     `;
   }
 
-  protected renderAttributes(attribute: Attribute): TemplateResult {
+  protected renderAttributes(attribute: Attribute, config: LogbookCardConfigBase): TemplateResult {
+    const attrStyle = styleMap(this.elementStyleInfo(config, 'attributes'));
+    if (config.attribute_hide_label) {
+      // 隐藏标签时，值显示在标签位置（左侧）
+      return html`
+        <div class="attribute" style=${attrStyle}>
+          <div class="value">${attribute.value}</div>
+        </div>
+      `;
+    }
     return html`
-      <div class="attribute">
+      <div class="attribute" style=${attrStyle}>
         <div class="key">${attribute.name}</div>
         <div class="value">${attribute.value}</div>
       </div>
@@ -230,9 +309,10 @@ export abstract class LogbookBaseCard extends LitElement {
   }
 
   renderHistoryDate(item: History, config: LogbookCardConfigBase): TemplateResult {
+    const dateStyle = styleMap(this.elementStyleInfo(config, 'time'));
     if (config?.show?.start_date && config?.show?.end_date) {
       return html`
-        <div class="date">
+        <div class="date" style=${dateStyle}>
           <logbook-date .hass=${this.hass} .date=${item.start} .config=${config}></logbook-date> -
           <logbook-date .hass=${this.hass} .date=${item.end} .config=${config}></logbook-date>
         </div>
@@ -240,16 +320,22 @@ export abstract class LogbookBaseCard extends LitElement {
     }
     if (config?.show?.end_date) {
       return html`
-        <div class="date">
+        <div class="date" style=${dateStyle}>
           <logbook-date .hass=${this.hass} .date=${item.end} .config=${config}></logbook-date>
         </div>
       `;
     }
     if (config?.show?.start_date) {
       return html`
-        <div class="date">
+        <div class="date" style=${dateStyle}>
           <logbook-date .hass=${this.hass} .date=${item.start} .config=${config}></logbook-date>
         </div>
+      `;
+    }
+    // 开始/结束日期都关闭但开启了显示时间时，仅显示开始时间
+    if (config?.show?.time !== false) {
+      return html`
+        <div class="date" style=${dateStyle}>${displayTime(this.hass, item.start, config.date_format)}</div>
       `;
     }
     return html``;
@@ -279,6 +365,26 @@ export abstract class LogbookBaseCard extends LitElement {
       .item-content {
         flex: 1;
       }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 0.5rem;
+      }
+      .row > * {
+        min-width: 0;
+      }
+      /* 行内右组：靠行尾对齐 */
+      .row-right {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 0.5rem;
+        margin-left: auto;
+      }
+      .row > .attribute {
+        flex: 1 1 auto;
+      }
       .item-icon {
         flex: 0 0 4rem;
         color: var(--paper-item-icon-color, #44739e);
@@ -295,7 +401,8 @@ export abstract class LogbookBaseCard extends LitElement {
       state-badge[icon] {
         height: fit-content;
       }
-      .state {
+      .state,
+      .attribute {
         white-space: pre-wrap;
       }
       .duration {
@@ -303,8 +410,7 @@ export abstract class LogbookBaseCard extends LitElement {
         font-style: italic;
         float: right;
       }
-      .date,
-      .attribute {
+      .date {
         font-size: 0.8rem;
         color: var(--secondary-text-color);
       }

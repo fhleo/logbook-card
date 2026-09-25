@@ -19,6 +19,7 @@ export interface EntityHistoryConfig {
   minimal_duration?: number;
   state_map?: StateMapRegexp[];
   show_history: boolean;
+  show_time?: boolean;
 }
 
 export const toHistory = (

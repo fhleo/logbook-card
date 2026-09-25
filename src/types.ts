@@ -9,8 +9,48 @@ export interface ExtendedHomeAssistant extends HomeAssistant {
   formatEntityAttributeName(stateObj: HassEntity, attribute: string): string;
 }
 
+/** 可排序的条目元素 */
+export type LayoutElementKey = 'state' | 'duration' | 'attributes' | 'time';
+
+/** 单个元素的行位置（v0.1.5/0.1.6 旧格式） */
+export interface LayoutItemPosition {
+  row?: number;
+  order?: number;
+}
+
+/**
+ * 条目内元素布局：
+ * - 新格式（v0.1.7+）：order 为全局显示顺序，line_breaks 中的元素之后另起一行，
+ *   align（v0.4.0+）声明靠右的元素（未声明的靠左）
+ * - 旧格式：按元素的 row/order 数字（仍兼容读取）
+ */
+export interface LayoutConfiguration {
+  order?: LayoutElementKey[];
+  line_breaks?: LayoutElementKey[];
+  align?: Partial<Record<LayoutElementKey, 'left' | 'right'>>;
+  state?: LayoutItemPosition | number;
+  duration?: LayoutItemPosition | number;
+  attributes?: LayoutItemPosition | number;
+  time?: LayoutItemPosition | number;
+}
+
+/** 单个元素的样式覆盖 */
+export interface ElementStyleConfig {
+  color?: string;
+  font_size?: string;
+}
+
+/** 各元素的样式设置（状态/持续时间/属性/时间） */
+export interface ElementStylesConfiguration {
+  state?: ElementStyleConfig;
+  duration?: ElementStyleConfig;
+  attributes?: ElementStyleConfig;
+  time?: ElementStyleConfig;
+}
+
 export interface LogbookCardConfigBase extends LovelaceCardConfig {
   title?: string;
+  show_title?: boolean;
   history?: number;
   hours_to_show?: number;
   collapse?: number;
@@ -28,6 +68,9 @@ export interface LogbookCardConfigBase extends LovelaceCardConfig {
   hold_action?: ActionConfig;
   double_tap_action?: ActionConfig;
   allow_copy?: boolean;
+  attribute_hide_label?: boolean;
+  layout?: LayoutConfiguration;
+  element_styles?: ElementStylesConfiguration;
 }
 
 export interface EntityCardConfig {
@@ -131,6 +174,7 @@ export interface ShowConfiguration {
   end_date: boolean;
   icon: boolean;
   separator: boolean;
+  time: boolean;
   entity_name: true;
 }
 
@@ -172,7 +216,7 @@ export interface Attribute {
 }
 
 export interface SeparatorStyleConfig {
-  width: number;
-  style: string;
-  color: string;
+  width?: number;
+  style?: string;
+  color?: string;
 }

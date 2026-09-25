@@ -66,13 +66,25 @@ export const extractAttributes = (
         keys.forEach(key => {
           p.push({
             name: key,
-            value: formatAttributeValue(hass, attributeValue[key], undefined, config.date_format),
+            value: formatAttributeValue(
+              hass,
+              attributeValue[key],
+              undefined,
+              config.date_format,
+              config.show_time !== false,
+            ),
           });
         });
       } else if (Array.isArray(attributeValue)) {
         p.push({
           name: c.label ? c.label : c.value,
-          value: formatAttributeValue(hass, attributeValue.join(','), undefined, config.date_format),
+          value: formatAttributeValue(
+            hass,
+            attributeValue.join(','),
+            undefined,
+            config.date_format,
+            config.show_time !== false,
+          ),
         });
       } else {
         const attributeName = hass.formatEntityAttributeName ? hass.formatEntityAttributeName(item, c.value) : c.value;
@@ -86,6 +98,7 @@ export const extractAttributes = (
             c.type,
             config.date_format,
             c.link_label,
+            config.show_time !== false,
           ),
         });
       }

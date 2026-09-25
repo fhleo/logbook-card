@@ -16,7 +16,7 @@ export class LogbookDate extends LitElement {
     }
 
     return html`
-      ${displayDate(this.hass, this.date, this.config.date_format)}
+      ${displayDate(this.hass, this.date, this.config.date_format, this.config.show?.time !== false)}
     `;
   }
 }
