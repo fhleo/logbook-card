@@ -1,8 +1,16 @@
 import { HassEntity } from 'home-assistant-js-websocket/dist/types';
-import { Attribute, AttributeConfig, ExtendedHomeAssistant, History, IconState, StateMapRegexp } from './types';
+import {
+  Attribute,
+  AttributeConfig,
+  AttributeStateMap,
+  ExtendedHomeAssistant,
+  History,
+  IconState,
+  StateMapRegexp,
+} from './types';
 import { computeStateDisplay, stateIcon } from 'custom-card-helpers';
 import { formatAttributeValue, formatEntityAttributeValue } from './formatter';
-import { addSlashes } from './helpers';
+import { addSlashes, wildcardToRegExp } from './helpers';
 import { EntityHistoryConfig } from './history';
 
 const findMatchingState = (states: StateMapRegexp[], entity: HassEntity): StateMapRegexp | undefined => {
@@ -46,6 +54,24 @@ export const mapIcon = (item: HassEntity, states: StateMapRegexp[]): IconState |
   return { icon: iconSvg, color: s?.icon_color || undefined };
 };
 
+/** 属性值映射：返回第一个匹配项的替换值（无匹配或未填替换值时返回 undefined） */
+const matchAttributeMap = (maps: Array<AttributeStateMap> | undefined, raw: any): string | undefined => {
+  if (!Array.isArray(maps) || maps.length === 0) {
+    return undefined;
+  }
+  const rawStr = String(raw);
+  for (const m of maps) {
+    if (!m.value || !m.replacement) {
+      continue;
+    }
+    const re = wildcardToRegExp(m.value);
+    if (re && re.test(rawStr)) {
+      return m.replacement;
+    }
+  }
+  return undefined;
+};
+
 export const extractAttributes = (
   item: HassEntity,
   config: EntityHistoryConfig,
@@ -66,41 +92,37 @@ export const extractAttributes = (
         keys.forEach(key => {
           p.push({
             name: key,
-            value: formatAttributeValue(
-              hass,
-              attributeValue[key],
-              undefined,
-              config.date_format,
-              config.show_time !== false,
-            ),
+            value: formatAttributeValue(hass, attributeValue[key], undefined, config.date_format),
           });
         });
       } else if (Array.isArray(attributeValue)) {
         p.push({
           name: c.label ? c.label : c.value,
-          value: formatAttributeValue(
-            hass,
-            attributeValue.join(','),
-            undefined,
-            config.date_format,
-            config.show_time !== false,
-          ),
+          value: formatAttributeValue(hass, attributeValue.join(','), undefined, config.date_format),
         });
       } else {
         const attributeName = hass.formatEntityAttributeName ? hass.formatEntityAttributeName(item, c.value) : c.value;
-        p.push({
-          name: c.label ? c.label : attributeName,
-          value: formatEntityAttributeValue(
-            hass,
-            item,
-            c.value,
-            attributeValue,
-            c.type,
-            config.date_format,
-            c.link_label,
-            config.show_time !== false,
-          ),
-        });
+        // 值映射命中时直接显示替换值（date/url 类型不参与映射）
+        const mapped = c.type ? undefined : matchAttributeMap(c.state_map, attributeValue);
+        if (mapped !== undefined) {
+          p.push({
+            name: c.label ? c.label : attributeName,
+            value: mapped,
+          });
+        } else {
+          p.push({
+            name: c.label ? c.label : attributeName,
+            value: formatEntityAttributeValue(
+              hass,
+              item,
+              c.value,
+              attributeValue,
+              c.type,
+              config.date_format,
+              c.link_label,
+            ),
+          });
+        }
       }
     }
     return p;

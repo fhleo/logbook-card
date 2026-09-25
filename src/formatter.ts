@@ -1,6 +1,6 @@
 import { format } from 'fecha';
 import { html, TemplateResult } from 'lit';
-import { formatDateTime, formatDate, formatTime } from 'custom-card-helpers';
+import { formatDateTime, formatDate } from 'custom-card-helpers';
 import { ExtendedHomeAssistant } from './types';
 import { HassEntity } from 'home-assistant-js-websocket/dist/types';
 
@@ -41,34 +41,6 @@ export const displayDate = (
     return formatDateTime(date, hass.locale!);
   }
   return formatDate(date, hass.locale!);
-};
-
-/**
- * 从 fecha 格式串中提取时间部分（从第一个时间 token 起到结尾）。
- * 例如 "DD/MM/YYYY HH:mm" -> "HH:mm"；无时间 token 时返回空串。
- */
-const extractTimeFromFormat = (fmt: string): string => {
-  // 注意大小写：月为 M（大写）不匹配；分/秒为 m/s（小写）
-  const match = /(LTS|LT|[Hh]{1,2}|[ms]{1,2}|S{1,3}|a|A)/.exec(fmt);
-  if (!match) {
-    return '';
-  }
-  return fmt.slice(match.index).trim();
-};
-
-export const displayTime = (
-  hass: ExtendedHomeAssistant,
-  date: Date,
-  dateFormat: string | 'relative' | undefined,
-): string => {
-  if (dateFormat && dateFormat !== 'relative') {
-    const timeFormat = extractTimeFromFormat(dateFormat);
-    if (timeFormat) {
-      return format(date, timeFormat);
-    }
-  }
-  // 未配置 date_format 或格式中无时间部分时，使用 HA 本地化时间格式
-  return formatTime(date, hass.locale!);
 };
 
 export const formatAttributeValue = (

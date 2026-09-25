@@ -34,10 +34,6 @@ const isLanguageSupported = (language: string): boolean => {
   return Object.keys(languages).includes(language);
 };
 
-const translationExistsForLanguage = (section: string, key: string, language: string): boolean => {
-  return languages[language] && languages[language][section] && languages[language][section][key];
-};
-
 /**
  * 智能匹配语言：先精确匹配，再尝试去掉地区码逐步匹配
  */
@@ -112,11 +108,16 @@ export function localize(string: string, search = '', replace = ''): string {
   const rawLanguage = getCurrentLanguage();
   let language = resolveLanguage(rawLanguage);
 
-  if (!translationExistsForLanguage(section, key, language)) {
-    return string;
+  let translated: string | undefined = languages[language]?.[section]?.[key];
+
+  // 当前语言缺少翻译时回退到英语（fr/nb 等部分翻译语言避免显示原始 key）
+  if (translated === undefined && language !== fallbackLanguage) {
+    translated = languages[fallbackLanguage]?.[section]?.[key];
   }
 
-  let translated = languages[language][section][key];
+  if (translated === undefined) {
+    return string;
+  }
 
   if (search !== '' && replace !== '') {
     translated = translated.replace(search, replace);

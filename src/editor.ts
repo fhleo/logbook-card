@@ -1,15 +1,18 @@
-import { DEFAULT_SHOW, DEFAULT_DURATION, DEFAULT_SEPARATOR_STYLE } from './const';
+import { DEFAULT_SHOW, DEFAULT_DURATION } from './const';
 import { LitElement, html, TemplateResult, CSSResult, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { HomeAssistant, fireEvent, LovelaceCardEditor, ActionConfig } from 'custom-card-helpers';
 
 import {
   LogbookCardConfig,
+  EntityCardConfig,
   StateMap,
   AttributeConfig,
   LayoutElementKey,
   LayoutConfiguration,
   ElementStyleConfig,
+  ElementStylesConfiguration,
+  ShowConfiguration,
 } from './types';
 import { normalizeLayout, layoutRows } from './layout';
 import { localize, setHass } from './localize/localize';
@@ -19,12 +22,19 @@ import { CARD_VERSION } from './const';
  * 动态构建选项对象 — 在 render 时调用，确保 localize() 能拿到正确的 hass 语言
  * show 状态保存在独立的 _showState 中，与 label 翻译解耦
  */
-type OptionKey = 'required' | 'appearance' | 'dataConfig' | 'actions';
+type OptionKey = 'required' | 'general' | 'appearance' | 'dataConfig' | 'actions';
 
-const ALL_OPTION_KEYS: OptionKey[] = ['required', 'appearance', 'dataConfig', 'actions'];
+const ALL_OPTION_KEYS: OptionKey[] = ['required', 'general', 'appearance', 'dataConfig', 'actions'];
+
+/** 日期格式预设（下拉可选项） */
+const DATE_PRESETS = ['YYYY-MM-DD HH:mm', 'YYYY-MM-DD', 'MM-DD HH:mm', 'HH:mm'];
+
+/** 日期格式「自定义」选项的哨兵值：选中后显示格式输入框 */
+const DATE_FORMAT_CUSTOM = '__custom__';
 
 const optionShowState: Record<OptionKey, boolean> = {
   required: true,
+  general: false,
   appearance: false,
   dataConfig: false,
   actions: false,
@@ -39,6 +49,11 @@ function buildOption(key: OptionKey) {
       icon: 'tune',
       nameKey: 'editor.required_option_name',
       secondaryKey: 'editor.required_option_description',
+    },
+    general: {
+      icon: 'cog',
+      nameKey: 'editor.general_option_name',
+      secondaryKey: 'editor.general_option_description',
     },
     appearance: {
       icon: 'palette',
@@ -68,6 +83,13 @@ function buildOption(key: OptionKey) {
 type ActionKey = 'tap_action' | 'hold_action' | 'double_tap_action';
 const ACTION_KEYS: ActionKey[] = ['tap_action', 'hold_action', 'double_tap_action'];
 
+/** 外观配置束：show / layout / element_styles 三件套（全局与实体级共用） */
+interface AppearanceBundle {
+  show?: ShowConfiguration;
+  layout?: LayoutConfiguration;
+  element_styles?: ElementStylesConfiguration;
+}
+
 /**
  * 分隔符线型（合并视觉相同的样式：groove/ridge/inset/outset 在细线宽度下与 solid 一致）
  * 每种线型以实际线条样式呈现在按钮中
@@ -80,9 +102,6 @@ const normalizeSeparatorStyle = (value?: string): SeparatorStyle =>
   (SEPARATOR_STYLES as readonly string[]).includes(value ?? '') ? (value as SeparatorStyle) : 'solid';
 
 const DURATION_LABEL_FIELDS = ['second', 'minute', 'hour', 'day', 'week', 'month'] as const;
-
-/** 可布局的元素 */
-const LAYOUT_ELEMENT_KEYS: LayoutElementKey[] = ['state', 'duration', 'attributes', 'time'];
 
 /** 字号单位与对应滑块范围 */
 const FONT_UNITS = ['rem', 'px', 'em', '%'];
@@ -111,7 +130,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
 
   @state() private _config?: Partial<LogbookCardConfig>;
   @state() private _toggle?: boolean;
-  @state() private _helpers?: any;
   @state() private _subOpen: Record<SubKey, boolean> = {
     show: true,
     layout: false,
@@ -122,6 +140,244 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     attributes: false,
     duration: false,
   };
+  /** 多实体模式下正在编辑的实体索引（entities 数组下标） */
+  @state() private _activeEntityIndex = 0;
+  /** 外观配置的作用目标实体（entities 下标）；外观始终按实体编辑，未配置的字段回退全局配置 */
+  @state() private _appearanceTarget = 0;
+  /** 日期格式是否处于自定义输入模式（选中「自定义」或 YAML 已配置非预设格式） */
+  @state() private _dateFormatCustom = false;
+
+  /** 外观配置读取：实体级 show/element_styles 键级合并在全局之上，layout 整体取实体（未配置回退全局） */
+  private _appearanceBundle(): AppearanceBundle {
+    const cfg = this._config;
+    const e = (cfg?.entities ?? [])[this._appearanceTarget];
+    return {
+      show: e?.show ? { ...cfg?.show, ...e.show } : cfg?.show,
+      layout: e?.layout ?? cfg?.layout,
+      element_styles: e?.element_styles ? { ...cfg?.element_styles, ...e.element_styles } : cfg?.element_styles,
+    };
+  }
+
+  /** 当前外观目标实体自身的配置（不含全局回退），写回时使用 */
+  private _appearanceOwnEntity(): EntityCardConfig {
+    const entities = this._config?.entities ?? [];
+    const idx = Math.min(Math.max(this._appearanceTarget, 0), Math.max(entities.length - 1, 0));
+    return entities[idx] ?? {};
+  }
+
+  /** 写回外观配置到目标实体（patch 中提供的字段整体替换；空对象删除键） */
+  private _writeAppearance(patch: Partial<AppearanceBundle>): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    const cfg: any = { ...this._config };
+    const entities: EntityCardConfig[] = [...(cfg.entities ?? [])];
+    const idx = Math.min(Math.max(this._appearanceTarget, 0), Math.max(entities.length - 1, 0));
+    const cur = { ...entities[idx] };
+    if (patch.show !== undefined) {
+      cur.show = Object.keys(patch.show).length > 0 ? patch.show : undefined;
+    }
+    if (patch.layout !== undefined) {
+      cur.layout = patch.layout;
+    }
+    if (patch.element_styles !== undefined) {
+      cur.element_styles = Object.keys(patch.element_styles).length > 0 ? patch.element_styles : undefined;
+    }
+    entities[idx] = cur;
+    cfg.entities = entities;
+    this._config = cfg;
+    fireEvent(this, 'config-changed', { config: this._config });
+  }
+
+  /** 当前外观目标实体的属性数量（决定布局中的属性条目数） */
+  private _appearanceAttrCount(): number {
+    const e = this._appearanceOwnEntity();
+    return Array.isArray(e.attributes) ? e.attributes.length : 0;
+  }
+
+  /** 属性布局条目的显示名：显示名 > 属性名 > 属性 N */
+  private _attrKeyLabel(key: LayoutElementKey): string {
+    const m = /^attributes:(\d+)$/.exec(String(key));
+    if (!m) {
+      return localize(`editor.layout_elem_${key}`);
+    }
+    const index = Number.parseInt(m[1]);
+    const attr = this._appearanceAttrs()[index];
+    const name = attr?.label || attr?.value;
+    return name
+      ? `${localize('editor.layout_elem_attributes')} · ${name}`
+      : `${localize('editor.layout_elem_attributes')} ${index + 1}`;
+  }
+
+  /** 当前外观目标实体的属性配置列表 */
+  private _appearanceAttrs(): AttributeConfig[] {
+    const attrs = this._appearanceOwnEntity().attributes;
+    return Array.isArray(attrs) ? (attrs as AttributeConfig[]) : [];
+  }
+
+  // ---------- 多实体模式（entities 数组存在即为多实体卡片） ----------
+  /** 编辑器统一按多实体结构工作：单实体旧配置规范化为单条 entities（保存时写回 entities 格式） */
+  private _normalizeConfig(config: LogbookCardConfig): LogbookCardConfig {
+    if (Array.isArray(config.entities)) {
+      return config;
+    }
+    const entityConfig: EntityCardConfig = {
+      entity: config.entity,
+      label: undefined,
+      attributes: config.attributes,
+      state_map: config.state_map,
+      hidden_state: config.hidden_state,
+      custom_logs: config.custom_logs,
+      custom_log_map: config.custom_log_map,
+    };
+    const cfg: any = { ...config };
+    delete cfg.entity;
+    delete cfg.attributes;
+    delete cfg.state_map;
+    delete cfg.hidden_state;
+    delete cfg.custom_logs;
+    delete cfg.custom_log_map;
+    cfg.entities = [entityConfig];
+    return cfg;
+  }
+
+  /** 正在编辑的实体配置 */
+  private get _activeEntity(): EntityCardConfig | undefined {
+    const entities = this._config?.entities;
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return undefined;
+    }
+    return entities[Math.min(this._activeEntityIndex, entities.length - 1)];
+  }
+
+  /** 读取当前编辑实体的字段（编辑器统一按多实体结构工作） */
+  private readEntityField<K extends keyof EntityCardConfig>(key: K): EntityCardConfig[K] | undefined {
+    return this._activeEntity?.[key];
+  }
+
+  /** 写入当前编辑实体的字段：value 为 undefined 时删除该键；完成后触发 config-changed */
+  private writeEntityField<K extends keyof EntityCardConfig>(key: K, value: EntityCardConfig[K] | undefined): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    const cfg: any = { ...this._config };
+    const entities: EntityCardConfig[] = [...(cfg.entities ?? [])];
+    if (entities.length === 0) {
+      entities.push({});
+    }
+    const idx = Math.min(Math.max(this._activeEntityIndex, 0), entities.length - 1);
+    const cur = { ...entities[idx] };
+    if (value === undefined) {
+      delete cur[key];
+    } else {
+      cur[key] = value;
+    }
+    entities[idx] = cur;
+    cfg.entities = entities;
+    this._config = cfg;
+    fireEvent(this, 'config-changed', { config: this._config });
+  }
+
+  /** 多实体模式下实体在列表中的显示名：显示名 > 实体友好名 > entity_id */
+  private _entityDisplayName(entity: EntityCardConfig, index: number): string {
+    if (entity.label) {
+      return entity.label;
+    }
+    const id = entity.entity;
+    const friendly =
+      id && this.hass?.states && id in this.hass.states
+        ? (this.hass.states[id] as any).attributes?.friendly_name
+        : undefined;
+    return friendly || id || `${localize('editor.entity_label')} ${index + 1}`;
+  }
+
+  // ---------- 多实体：实体列表管理 ----------
+  private _addEntity(): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    const cfg: any = { ...this._config };
+    cfg.entities = [...(cfg.entities ?? []), { entity: '' }];
+    this._config = cfg;
+    this._activeEntityIndex = cfg.entities.length - 1;
+    fireEvent(this, 'config-changed', { config: this._config });
+  }
+
+  private _removeEntity(index: number): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    const cfg: any = { ...this._config };
+    const entities: EntityCardConfig[] = [...(cfg.entities ?? [])];
+    entities.splice(index, 1);
+    cfg.entities = entities;
+    if (this._activeEntityIndex >= entities.length) {
+      this._activeEntityIndex = Math.max(0, entities.length - 1);
+    }
+    if (this._appearanceTarget > entities.length - 1) {
+      this._appearanceTarget = Math.max(0, entities.length - 1);
+    }
+    this._config = cfg;
+    fireEvent(this, 'config-changed', { config: this._config });
+  }
+
+  private _updateEntityField(index: number, key: 'entity' | 'label', value: string): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    const cfg: any = { ...this._config };
+    const entities: EntityCardConfig[] = [...(cfg.entities ?? [])];
+    const cur = { ...entities[index] };
+    if (value === '') {
+      delete cur[key];
+    } else {
+      cur[key] = value;
+    }
+    entities[index] = cur;
+    cfg.entities = entities;
+    this._config = cfg;
+    fireEvent(this, 'config-changed', { config: this._config });
+  }
+
+  private _renderEntitiesList(): TemplateResult {
+    const entities = Array.isArray(this._config?.entities) ? this._config!.entities : [];
+    return html`
+      <p class="hint">${localize('editor.entity_list_hint')}</p>
+      ${entities.map(
+        (e, i) => html`
+          <div class="list-row entity-row ${this._activeEntityIndex === i ? 'active' : ''}">
+            <button
+              class="remove-btn"
+              title=${localize('editor.remove_item_label')}
+              @click=${() => this._removeEntity(i)}
+            >
+              ✕
+            </button>
+            <div class="entity-row-index">${i + 1}</div>
+            <ha-entity-picker
+              class="full"
+              .hass=${this.hass}
+              .label=${localize('editor.entity_label')}
+              .value=${e.entity ?? ''}
+              .allowCustomEntity=${false}
+              @value-changed=${(ev: CustomEvent) =>
+                this._updateEntityField(i, 'entity', (ev.detail?.value as string) ?? '')}
+            ></ha-entity-picker>
+            <label class="field full">
+              <span class="field-label">${localize('editor.entity_label_label')}</span>
+              <input
+                type="text"
+                .value=${e.label ?? ''}
+                .placeholder=${this._entityDisplayName(e, i)}
+                @input=${(ev: Event) => this._updateEntityField(i, 'label', (ev.target as HTMLInputElement).value)}
+              />
+            </label>
+          </div>
+        `,
+      )}
+      <button class="add-btn" @click=${this._addEntity}>${localize('editor.add_item_label')}</button>
+    `;
+  }
 
   private _toggleSub(ev: Event): void {
     const key = (ev.currentTarget as HTMLElement).sub as SubKey;
@@ -185,22 +441,15 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
           @change=${this._showOptionChanged}
         ></ha-switch>
       </ha-formfield>
-      <ha-formfield .label=${localize('editor.display_separator_label')}>
+      <ha-formfield .label=${localize('editor.show_entity_name_label')}>
         <ha-switch
-          aria-label=${`Toggle display of event separator ${this._show_separator ? 'off' : 'on'}`}
-          .checked=${this._show_separator !== false}
-          .configValue=${'separator'}
+          aria-label=${`Toggle display of entity name ${this._show_entity_name ? 'off' : 'on'}`}
+          .checked=${this._show_entity_name}
+          .configValue=${'entity_name'}
           @change=${this._showOptionChanged}
         ></ha-switch>
       </ha-formfield>
-      <ha-formfield .label=${localize('editor.display_custom_logs_label')}>
-        <ha-switch
-          aria-label=${`Toggle display of custom logs ${this._custom_logs ? 'off' : 'on'}`}
-          .checked=${this._custom_logs !== false}
-          .configValue=${'custom_logs'}
-          @change=${this._valueChanged}
-        ></ha-switch>
-      </ha-formfield>
+      <p class="sub-hint">${localize('editor.card_wide_label')}</p>
       <ha-formfield .label=${localize('editor.show_history_label')}>
         <ha-switch
           aria-label=${`Toggle display of history ${this._show_history ? 'off' : 'on'}`}
@@ -229,10 +478,21 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
   }
 
   // ---------- 布局（预览 + 行/对齐/顺序） ----------
+  /** 当前外观目标的布局元素键列表（基础元素 + 每个属性一个键） */
+  private _layoutKeys(): LayoutElementKey[] {
+    const count = this._appearanceAttrCount();
+    const keys: LayoutElementKey[] = ['state', 'duration'];
+    for (let i = 0; i < count; i++) {
+      keys.push(`attributes:${i}`);
+    }
+    keys.push('time');
+    return keys;
+  }
+
   /** 每个元素当前所在的行与对齐（从布局配置反解析） */
-  private _layoutAssign(): Record<LayoutElementKey, { row: number; align: 'left' | 'right' }> {
-    const layout = this._config?.layout;
-    const plan = normalizeLayout(layout);
+  private _layoutAssign(): Record<string, { row: number; align: 'left' | 'right' }> {
+    const layout = this._appearanceBundle().layout;
+    const plan = normalizeLayout(layout, this._appearanceAttrCount());
     const result: any = {};
     let row = 1;
     plan.forEach(item => {
@@ -254,10 +514,10 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
 
   /** 实时预览：按行渲染元素胶囊，右组靠右 */
   private _renderLayoutPreview(): TemplateResult {
-    const rows = layoutRows(this._config?.layout);
+    const rows = layoutRows(this._appearanceBundle().layout, this._appearanceAttrCount());
     const chip = (key: LayoutElementKey) =>
       html`
-        <span class="layout-chip">${localize(`editor.layout_elem_${key}`)}</span>
+        <span class="layout-chip">${this._attrKeyLabel(key)}</span>
       `;
     return html`
       <div class="layout-preview">
@@ -279,15 +539,16 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
 
   private _renderLayoutEditor(): TemplateResult {
     const assign = this._layoutAssign();
+    const layoutKeys = this._layoutKeys();
     return html`
       <p class="hint">${localize('editor.layout_hint')}</p>
       ${this._renderLayoutPreview()}
       <div class="layout-config">
-        ${LAYOUT_ELEMENT_KEYS.map(key => {
-          const a = assign[key];
+        ${layoutKeys.map(key => {
+          const a = assign[key] ?? { row: 1, align: 'left' };
           return html`
             <div class="layout-config-row">
-              <span class="layout-config-name">${localize(`editor.layout_elem_${key}`)}</span>
+              <span class="layout-config-name">${this._attrKeyLabel(key)}</span>
               <select
                 class="native-select"
                 title=${localize('editor.layout_row_label')}
@@ -334,26 +595,28 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     `;
   }
 
-  /** 把元素行/对齐配置写回 layout 配置（组内顺序沿用 baseOrder 或当前显示顺序） */
+  /** 把元素行/对齐配置写回布局配置（组内顺序沿用 baseOrder 或当前显示顺序） */
   private _writeLayoutAssign(
-    assign: Record<LayoutElementKey, { row: number; align: 'left' | 'right' }>,
+    assign: Record<string, { row: number; align: 'left' | 'right' }>,
     baseOrder?: LayoutElementKey[],
   ): void {
     if (!this._config || !this.hass) {
       return;
     }
-    const currentOrder = baseOrder ?? normalizeLayout(this._config.layout).map(item => item.key);
+    const layoutKeys = this._layoutKeys();
+    const currentOrder =
+      baseOrder ?? normalizeLayout(this._appearanceBundle().layout, this._appearanceAttrCount()).map(item => item.key);
     const idxOf = (k: LayoutElementKey) => {
       const i = currentOrder.indexOf(k);
       return i < 0 ? 99 : i;
     };
-    const rowNums = Array.from(new Set(LAYOUT_ELEMENT_KEYS.map(k => assign[k].row))).sort((a, b) => a - b);
+    const rowNums = Array.from(new Set(layoutKeys.map(k => assign[k]?.row ?? 1))).sort((a, b) => a - b);
     const order: LayoutElementKey[] = [];
     const lineBreaks: LayoutElementKey[] = [];
     rowNums.forEach((r, i) => {
-      const inRow = LAYOUT_ELEMENT_KEYS.filter(k => assign[k].row === r);
-      const left = inRow.filter(k => assign[k].align === 'left').sort((a, b) => idxOf(a) - idxOf(b));
-      const right = inRow.filter(k => assign[k].align === 'right').sort((a, b) => idxOf(a) - idxOf(b));
+      const inRow = layoutKeys.filter(k => (assign[k]?.row ?? 1) === r);
+      const left = inRow.filter(k => (assign[k]?.align ?? 'left') === 'left').sort((a, b) => idxOf(a) - idxOf(b));
+      const right = inRow.filter(k => (assign[k]?.align ?? 'left') === 'right').sort((a, b) => idxOf(a) - idxOf(b));
       order.push(...left, ...right);
       if (i < rowNums.length - 1) {
         lineBreaks.push(order[order.length - 1]);
@@ -361,18 +624,15 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     });
     const layout: LayoutConfiguration = { order, line_breaks: lineBreaks };
     const align: Partial<Record<LayoutElementKey, 'right'>> = {};
-    LAYOUT_ELEMENT_KEYS.forEach(k => {
-      if (assign[k].align === 'right') {
+    layoutKeys.forEach(k => {
+      if ((assign[k]?.align ?? 'left') === 'right') {
         align[k] = 'right';
       }
     });
     if (Object.keys(align).length > 0) {
       layout.align = align;
     }
-    const cfg = { ...this._config };
-    cfg.layout = layout;
-    this._config = cfg;
-    fireEvent(this, 'config-changed', { config: this._config });
+    this._writeAppearance({ layout });
   }
 
   private _layoutRowChanged(key: LayoutElementKey, row: number): void {
@@ -380,22 +640,25 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       return;
     }
     const assign = this._layoutAssign();
-    assign[key].row = row;
+    assign[key] = { ...(assign[key] ?? { row: 1, align: 'left' }), row };
     this._writeLayoutAssign(assign);
   }
 
   private _layoutAlignChanged(key: LayoutElementKey, align: 'left' | 'right'): void {
     const assign = this._layoutAssign();
-    assign[key].align = align;
+    assign[key] = { ...(assign[key] ?? { row: 1, align: 'left' }), align };
     this._writeLayoutAssign(assign);
   }
 
   /** 同行同侧内调整顺序：交换两个元素在显示序列中的位置 */
   private _layoutOrderMove(key: LayoutElementKey, dir: -1 | 1): void {
-    const order = normalizeLayout(this._config?.layout).map(item => item.key);
+    const order = normalizeLayout(this._appearanceBundle().layout, this._appearanceAttrCount()).map(item => item.key);
     const assign = this._layoutAssign();
-    const group = LAYOUT_ELEMENT_KEYS.filter(
-      k => assign[k].row === assign[key].row && assign[k].align === assign[key].align,
+    const layoutKeys = this._layoutKeys();
+    const group = layoutKeys.filter(
+      k =>
+        (assign[k]?.row ?? 1) === (assign[key]?.row ?? 1) &&
+        (assign[k]?.align ?? 'left') === (assign[key]?.align ?? 'left'),
     );
     group.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     const pos = group.indexOf(key);
@@ -424,6 +687,14 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
 
   private _renderSeparatorFields(): TemplateResult {
     return html`
+      <ha-formfield .label=${localize('editor.display_separator_label')}>
+        <ha-switch
+          aria-label=${`Toggle display of event separator ${this._show_separator ? 'off' : 'on'}`}
+          .checked=${this._show_separator}
+          .configValue=${'separator'}
+          @change=${this._showOptionChanged}
+        ></ha-switch>
+      </ha-formfield>
       <div class="select-wrap">
         <label class="select-label">${localize('editor.separator_width_label')}</label>
         <select
@@ -479,6 +750,38 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     `;
   }
 
+  /** 通用实体目标选择器：外观与数据配置共用（选择配置作用于哪个实体） */
+  private _renderEntityTargetSelector(
+    label: string,
+    activeIndex: number,
+    onSelect: (idx: number) => void,
+  ): TemplateResult {
+    const entities = Array.isArray(this._config?.entities) ? this._config!.entities : [];
+    if (entities.length === 0) {
+      return html``;
+    }
+    return html`
+      <div class="select-wrap">
+        <label class="select-label">${label}</label>
+        <select
+          class="native-select"
+          @change=${(ev: Event) => {
+            const idx = Number.parseInt((ev.target as HTMLSelectElement).value);
+            if (!Number.isNaN(idx)) {
+              onSelect(idx);
+            }
+          }}
+        >
+          ${entities.map(
+            (e, i) => html`
+              <option value=${i} ?selected=${activeIndex === i}>${this._entityDisplayName(e, i)}</option>
+            `,
+          )}
+        </select>
+      </div>
+    `;
+  }
+
   // ---------- 数据配置：状态映射 / 隐藏状态 / 属性 / 持续时间 ----------
   private _renderStateMapList(): TemplateResult {
     return html`
@@ -501,7 +804,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
               />
             </label>
             <label class="field">
-              <span class="field-label">${localize('editor.state_map_label_label')}</span>
+              <span class="field-label">${localize('editor.state_map_replacement_label')}</span>
               <input
                 type="text"
                 .value=${item.label || ''}
@@ -629,6 +932,42 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
               />
             </label>
           </div>
+          <div class="attr-map-block">
+            ${(item.state_map ?? []).map(
+              (m, mi) => html`
+                <div class="list-row attr-map-row">
+                  <button
+                    class="remove-btn"
+                    title=${localize('editor.remove_item_label')}
+                    @click=${() => this._removeAttributeStateMapItem(i, mi)}
+                  >
+                    ✕
+                  </button>
+                  <label class="field">
+                    <span class="field-label">${localize('editor.attribute_map_value_label')}</span>
+                    <input
+                      type="text"
+                      .value=${m.value || ''}
+                      @input=${(ev: Event) =>
+                        this._updateAttributeStateMapItem(i, mi, 'value', (ev.target as HTMLInputElement).value)}
+                    />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">${localize('editor.state_map_replacement_label')}</span>
+                    <input
+                      type="text"
+                      .value=${m.replacement || ''}
+                      @input=${(ev: Event) =>
+                        this._updateAttributeStateMapItem(i, mi, 'replacement', (ev.target as HTMLInputElement).value)}
+                    />
+                  </label>
+                </div>
+              `,
+            )}
+            <button class="add-btn" @click=${() => this._addAttributeStateMapItem(i)}>
+              ${localize('editor.attribute_map_add_label')}
+            </button>
+          </div>
         `,
       )}
       <button class="add-btn" @click=${this._addAttributeItem}>
@@ -730,7 +1069,28 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     fireEvent(this, 'config-changed', { config: this._config });
   }
 
-  private _dateFormatChanged(value: string): void {
+  /** 日期格式下拉变化：选「自定义」只切换输入框显示，选其他项收起输入框并写值 */
+  private _dateFormatSelectChanged(value: string): void {
+    if (!this._config || !this.hass) {
+      return;
+    }
+    if (value === DATE_FORMAT_CUSTOM) {
+      this._dateFormatCustom = true;
+      return;
+    }
+    this._dateFormatCustom = false;
+    this._writeDateFormat(value);
+  }
+
+  /**
+   * 自定义格式输入框输入：只写值，不改动 _dateFormatCustom。
+   * 若在此重置显示状态，重渲染会移除输入框，导致每输入一个字符就失去焦点
+   */
+  private _dateFormatInputChanged(value: string): void {
+    this._writeDateFormat(value);
+  }
+
+  private _writeDateFormat(value: string): void {
     if (!this._config || !this.hass) {
       return;
     }
@@ -768,8 +1128,12 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
   }
 
   public setConfig(config: LogbookCardConfig): void {
-    this._config = config;
-    this.loadCardHelpers();
+    this._config = this._normalizeConfig(config);
+    // 外观目标实体下标越界保护
+    const count = Array.isArray(this._config?.entities) ? this._config!.entities!.length : 0;
+    this._appearanceTarget = Math.min(Math.max(this._appearanceTarget, 0), Math.max(count - 1, 0));
+    // YAML 已配置非预设格式时，日期格式下拉定位到「自定义」并显示输入框
+    this._dateFormatCustom = this._isCustomDateFormat;
   }
 
   get _title(): string {
@@ -777,9 +1141,9 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     return this._config?.title ?? '';
   }
 
-  /** 标题输入框的占位提示（展示卡片默认会用的标题） */
+  /** 标题输入框的占位提示（展示卡片默认会用的标题；多实体取第一个实体） */
   get _titlePlaceholder(): string {
-    const entity = this._config?.entity;
+    const entity = (this._config?.entities ?? [])[0]?.entity;
     const friendly =
       entity && this.hass?.states && entity in this.hass.states
         ? (this.hass.states[entity] as any).attributes?.friendly_name
@@ -787,13 +1151,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     return friendly
       ? localize('logbook_card.default_title', '{entity}', friendly)
       : localize('editor.title_placeholder');
-  }
-
-  get _entity(): string {
-    if (this._config) {
-      return this._config.entity || '';
-    }
-    return '';
   }
 
   get _hours_to_show(): number | '' {
@@ -816,6 +1173,12 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       return this._config.date_format || '';
     }
     return '';
+  }
+
+  /** 当前日期格式是否为自定义（非空、非 relative、非预设） */
+  get _isCustomDateFormat(): boolean {
+    const f = this._date_format;
+    return !!f && f !== 'relative' && !DATE_PRESETS.includes(f);
   }
 
   get _no_event(): string {
@@ -844,56 +1207,51 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     return this._config?.minimal_duration ?? 0;
   }
 
+  // ---------- 显示开关（读外观目标载体的 show 配置） ----------
+  private _showValue(key: keyof ShowConfiguration): boolean | undefined {
+    const show = this._appearanceBundle().show;
+    return show && show[key] !== undefined ? show[key] : DEFAULT_SHOW[key];
+  }
+
   get _show_state(): boolean {
-    if (this._config && this._config.show) {
-      return this._config.show?.state;
-    }
-    return DEFAULT_SHOW.state;
+    return this._showValue('state') !== false;
   }
 
   get _show_duration(): boolean {
-    if (this._config && this._config.show) {
-      return this._config.show?.duration;
-    }
-    return DEFAULT_SHOW.duration;
+    return this._showValue('duration') !== false;
   }
 
   get _show_start_date(): boolean {
-    if (this._config && this._config.show) {
-      return this._config.show?.start_date;
-    }
-    return DEFAULT_SHOW.start_date;
+    return this._showValue('start_date') !== false;
   }
 
   get _show_end_date(): boolean {
-    if (this._config && this._config.show) {
-      return this._config.show?.end_date;
-    }
-    return DEFAULT_SHOW.end_date;
+    return this._showValue('end_date') !== false;
   }
 
   get _show_icon(): boolean {
-    if (this._config && this._config.show) {
-      return this._config.show?.icon;
-    }
-    return DEFAULT_SHOW.icon;
+    return this._showValue('icon') === true;
   }
 
   get _show_separator(): boolean {
-    return this._config?.show?.separator ?? DEFAULT_SHOW.separator;
+    return this._showValue('separator') !== false;
+  }
+
+  get _show_entity_name(): boolean {
+    return this._showValue('entity_name') !== false;
   }
 
   get _custom_logs(): boolean {
-    return this._config?.custom_logs || false;
+    return this.readEntityField('custom_logs') === true;
   }
 
   get _attribute_hide_label(): boolean {
     return this._config?.attribute_hide_label === true;
   }
 
-  /** 读取当前实体的属性名列表，供属性下拉选择 */
+  /** 读取当前实体的属性名列表，供属性下拉选择（多实体模式取正在编辑的实体） */
   private _entityAttributeNames(): string[] {
-    const entity = this._config?.entity;
+    const entity = this._activeEntity?.entity;
     if (!entity || !this.hass?.states || !(entity in this.hass.states)) {
       return [];
     }
@@ -917,15 +1275,17 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
   }
 
   get _state_map(): Array<StateMap> {
-    return Array.isArray(this._config?.state_map) ? (this._config!.state_map as Array<StateMap>) : [];
+    const sm = this.readEntityField('state_map');
+    return Array.isArray(sm) ? (sm as Array<StateMap>) : [];
   }
 
   get _attributes(): Array<AttributeConfig> {
-    return Array.isArray(this._config?.attributes) ? (this._config!.attributes as Array<AttributeConfig>) : [];
+    const attrs = this.readEntityField('attributes');
+    return Array.isArray(attrs) ? (attrs as Array<AttributeConfig>) : [];
   }
 
   get _hidden_state_text(): string {
-    const hs = this._config?.hidden_state;
+    const hs = this.readEntityField('hidden_state');
     if (Array.isArray(hs) && hs.every(s => typeof s === 'string')) {
       return (hs as string[]).join('\n');
     }
@@ -933,7 +1293,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
   }
 
   get _hidden_state_has_objects(): boolean {
-    const hs = this._config?.hidden_state;
+    const hs = this.readEntityField('hidden_state');
     return Array.isArray(hs) && hs.some(s => typeof s !== 'string');
   }
 
@@ -982,6 +1342,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
 
     // render 时动态构建选项，确保 localize() 能读取到正确的语言
     const required = buildOption('required');
+    const general = buildOption('general');
     const appearance = buildOption('appearance');
     const dataConfig = buildOption('dataConfig');
     const actions = buildOption('actions');
@@ -996,23 +1357,16 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         ${required.show
           ? html`
               <div class="values">
-                <ha-entity-picker
-                  .hass=${this.hass}
-                  .label=${localize('editor.entity_label')}
-                  .configValue=${'entity'}
-                  .value=${this._entity}
-                  .allowCustomEntity=${false}
-                  @value-changed=${this._valueChanged}
-                ></ha-entity-picker>
+                ${this._renderEntitiesList()}
               </div>
             `
           : ''}
-        <div class="option" @click=${this._toggleOption} .option=${'appearance'}>
-          <ha-icon class="option-icon" .icon=${`mdi:${appearance.icon}`}></ha-icon>
-          <div class="option-title">${appearance.name}</div>
-          <div class="option-secondary">${appearance.secondary}</div>
+        <div class="option" @click=${this._toggleOption} .option=${'general'}>
+          <ha-icon class="option-icon" .icon=${`mdi:${general.icon}`}></ha-icon>
+          <div class="option-title">${general.name}</div>
+          <div class="option-secondary">${general.secondary}</div>
         </div>
-        ${appearance.show
+        ${general.show
           ? html`
               <div class="values">
                 <div class="title-row">
@@ -1075,7 +1429,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                   <label class="select-label">${localize('editor.date_format_label')}</label>
                   <select
                     class="native-select"
-                    @change=${(ev: Event) => this._dateFormatChanged((ev.target as HTMLSelectElement).value)}
+                    @change=${(ev: Event) => this._dateFormatSelectChanged((ev.target as HTMLSelectElement).value)}
                   >
                     <option value="" ?selected=${this._date_format === ''}>
                       ${localize('editor.date_format_default')}
@@ -1083,21 +1437,28 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     <option value="relative" ?selected=${this._date_format === 'relative'}>
                       ${localize('editor.date_format_relative')}
                     </option>
-                    ${['YYYY-MM-DD HH:mm', 'YYYY-MM-DD', 'MM-DD HH:mm', 'HH:mm'].map(
+                    ${DATE_PRESETS.map(
                       f => html`
-                        <option value=${f} ?selected=${this._date_format === f}>${f}</option>
+                        <option value=${f} ?selected=${!this._dateFormatCustom && this._date_format === f}>${f}</option>
                       `,
                     )}
-                    ${this._date_format !== '' &&
-                    this._date_format !== 'relative' &&
-                    !['YYYY-MM-DD HH:mm', 'YYYY-MM-DD', 'MM-DD HH:mm', 'HH:mm'].includes(this._date_format)
-                      ? html`
-                          <option value=${this._date_format} ?selected>
-                            ${localize('editor.date_format_custom')}（${this._date_format}）
-                          </option>
-                        `
-                      : ''}
+                    <option value=${DATE_FORMAT_CUSTOM} ?selected=${this._dateFormatCustom}>
+                      ${localize('editor.date_format_custom')}
+                    </option>
                   </select>
+                  ${this._dateFormatCustom
+                    ? html`
+                        <label class="field">
+                          <span class="field-label">${localize('editor.date_format_custom_input')}</span>
+                          <input
+                            type="text"
+                            .value=${this._date_format}
+                            placeholder="YYYY-MM-DD HH:mm:ss"
+                            @input=${(ev: Event) => this._dateFormatInputChanged((ev.target as HTMLInputElement).value)}
+                          />
+                        </label>
+                      `
+                    : ''}
                 </div>
                 <label class="field">
                   <span class="field-label">${localize('editor.minimal_duration_label')}</span>
@@ -1117,6 +1478,22 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
                     @change=${this._valueChanged}
                   ></ha-switch>
                 </ha-formfield>
+              </div>
+            `
+          : ''}
+        <div class="option" @click=${this._toggleOption} .option=${'appearance'}>
+          <ha-icon class="option-icon" .icon=${`mdi:${appearance.icon}`}></ha-icon>
+          <div class="option-title">${appearance.name}</div>
+          <div class="option-secondary">${appearance.secondary}</div>
+        </div>
+        ${appearance.show
+          ? html`
+              <div class="values">
+                ${this._renderEntityTargetSelector(
+                  localize('editor.appearance_target_label'),
+                  this._appearanceTarget,
+                  idx => (this._appearanceTarget = idx),
+                )}
                 ${this._subSection('show', localize('editor.show_option_name'), this._renderShowToggles())}
                 ${this._subSection('layout', localize('editor.layout_option_name'), this._renderLayoutEditor())}
                 ${this._subSection('styles', localize('editor.styles_option_name'), this._renderStyleRows())}
@@ -1136,6 +1513,22 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         ${dataConfig.show
           ? html`
               <div class="values">
+                ${this._renderEntityTargetSelector(
+                  localize('editor.data_target_entity_label'),
+                  this._activeEntityIndex,
+                  idx => (this._activeEntityIndex = idx),
+                )}
+                <ha-formfield .label=${localize('editor.display_custom_logs_label')}>
+                  <ha-switch
+                    aria-label=${`Toggle display of custom logs ${this._custom_logs ? 'off' : 'on'}`}
+                    .checked=${this._custom_logs}
+                    @change=${(ev: Event) =>
+                      this.writeEntityField(
+                        'custom_logs',
+                        (ev.target as HTMLInputElement).checked === true ? true : undefined,
+                      )}
+                  ></ha-switch>
+                </ha-formfield>
                 ${this._subSection('stateMap', localize('editor.state_map_option_name'), this._renderStateMapList())}
                 ${this._subSection(
                   'hiddenState',
@@ -1165,9 +1558,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
           : ''}
       </div>
 
-      <p class="note">
-        ${localize('editor.note')}
-      </p>
       <p class="version">logbook-card v${CARD_VERSION}</p>
     `;
   }
@@ -1280,10 +1670,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     `;
   }
 
-  private async loadCardHelpers(): Promise<void> {
-    this._helpers = await (window as any).loadCardHelpers();
-  }
-
   private _toggleOption(ev: Event): void {
     // 用 currentTarget 替代 target，确保拿到绑定了 .option 属性的父元素
     // CSS 的 pointer-events: none 让子元素不接收点击，但 currentTarget 更可靠
@@ -1303,28 +1689,35 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (!this._config || !this.hass) {
       return;
     }
-    const target = ev.target;
-    if (this[`_${target.configValue}`] === target.value) {
+    const target = ev.target as any;
+    if (!target.configValue) {
       return;
     }
-    if (target.configValue) {
-      if (target.value === '') {
-        const tmpConfig = { ...this._config };
-        delete tmpConfig[target.configValue];
-        this._config = tmpConfig;
-      } else {
-        this._config = {
-          ...this._config,
-          [target.configValue]:
-            target.checked !== undefined
-              ? target.checked
-              : target.attributes['type'] &&
-                target.attributes['type'].value === 'number' &&
-                Number.parseInt(target.value)
-              ? Number.parseInt(target.value)
-              : target.value,
-        };
+    // 开关类（ha-switch/checkbox）取 checked；原生输入的 checked 恒有值（非复选框为 false），不可用于判断
+    if (target.tagName === 'HA-SWITCH' || target.type === 'checkbox') {
+      if ((this._config as any)[target.configValue] === target.checked) {
+        return;
       }
+      this._config = { ...this._config, [target.configValue]: target.checked };
+      fireEvent(this, 'config-changed', { config: this._config });
+      return;
+    }
+    // 文本/数字输入：与当前值相同则跳过，空值删除键，数字输入转整数
+    if (target.value === this[`_${target.configValue}`]) {
+      return;
+    }
+    if (target.value === '') {
+      const tmpConfig = { ...this._config };
+      delete tmpConfig[target.configValue];
+      this._config = tmpConfig;
+    } else if (target.type === 'number') {
+      const n = Number.parseInt(target.value, 10);
+      if (Number.isNaN(n)) {
+        return;
+      }
+      this._config = { ...this._config, [target.configValue]: n };
+    } else {
+      this._config = { ...this._config, [target.configValue]: target.value };
     }
     fireEvent(this, 'config-changed', { config: this._config });
   }
@@ -1335,20 +1728,25 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     }
     const target = ev.target;
     if (target.configValue) {
-      this._config = {
-        ...this._config,
-        show: {
-          ...(this._config.show || DEFAULT_SHOW),
-          [target.configValue]: target.checked,
-        },
-      };
+      // 只在目标实体自身 show 上改动（保留已有覆盖键），避免把全局值固化进实体
+      const current = { ...(this._appearanceOwnEntity().show ?? {}) };
+      current[target.configValue] = target.checked;
+      this._writeAppearance({ show: current as ShowConfiguration });
     }
-    fireEvent(this, 'config-changed', { config: this._config });
   }
 
   // ---------- 元素样式（颜色/字号） ----------
+  /** 布局键 → 样式存储键（属性们共用一条 attributes 样式） */
+  private _styleBaseKey(key: LayoutElementKey): 'state' | 'duration' | 'attributes' | 'time' {
+    return (key === 'attributes' || String(key).startsWith('attributes:') ? 'attributes' : key) as
+      | 'state'
+      | 'duration'
+      | 'attributes'
+      | 'time';
+  }
+
   private _elementStyle(key: LayoutElementKey): ElementStyleConfig {
-    return this._config?.element_styles?.[key] || {};
+    return this._appearanceBundle().element_styles?.[this._styleBaseKey(key)] || {};
   }
 
   /** 读取主题 CSS 变量的实际值，用于让输入框显示当前生效的默认样式 */
@@ -1454,20 +1852,15 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     if (!this._config || !this.hass) {
       return;
     }
-    const styles = { ...(this._config.element_styles || {}) };
+    const baseKey = this._styleBaseKey(key);
+    // 只在目标实体自身 element_styles 上改动（保留已有覆盖键），避免把全局值固化进实体
+    const styles = { ...(this._appearanceOwnEntity().element_styles || {}) };
     if (style && Object.keys(style).length > 0) {
-      styles[key] = style;
+      styles[baseKey] = style;
     } else {
-      delete styles[key];
+      delete styles[baseKey];
     }
-    const cfg = { ...this._config };
-    if (Object.keys(styles).length === 0) {
-      delete cfg.element_styles;
-    } else {
-      cfg.element_styles = styles;
-    }
-    this._config = cfg;
-    fireEvent(this, 'config-changed', { config: this._config });
+    this._writeAppearance({ element_styles: styles });
   }
 
   private _styleColorChanged(key: LayoutElementKey, ev: Event): void {
@@ -1500,72 +1893,48 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
     this._writeElementStyles(key, undefined);
   }
 
-  // ---------- hidden_state ----------
+  // ---------- hidden_state（单实体写顶层，多实体写当前实体） ----------
   private _hiddenStateChanged(ev): void {
     if (!this._config || !this.hass) return;
     const lines = String(ev.target.value)
       .split('\n')
       .map(s => s.trim())
       .filter(s => s !== '');
-    const cfg = { ...this._config };
-    if (lines.length === 0) {
-      delete cfg.hidden_state;
-    } else {
-      cfg.hidden_state = lines;
-    }
-    this._config = cfg;
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('hidden_state', lines.length > 0 ? lines : undefined);
   }
 
-  // ---------- state_map ----------
+  // ---------- state_map（单实体写顶层，多实体写当前实体） ----------
   private _addStateMapItem(): void {
     if (!this._config || !this.hass) return;
     const list = [...this._state_map, { value: '', label: '' }];
-    this._config = { ...this._config, state_map: list };
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('state_map', list);
   }
 
   private _removeStateMapItem(index: number): void {
     if (!this._config || !this.hass) return;
     const list = [...this._state_map];
     list.splice(index, 1);
-    const cfg = { ...this._config };
-    if (list.length === 0) {
-      delete cfg.state_map;
-    } else {
-      cfg.state_map = list;
-    }
-    this._config = cfg;
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('state_map', list.length > 0 ? list : undefined);
   }
 
   private _updateStateMapItem(index: number, field: string, value: string): void {
     if (!this._config || !this.hass) return;
     const list = this._state_map.map((item, i) => (i === index ? { ...item, [field]: value } : item));
-    this._config = { ...this._config, state_map: list };
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('state_map', list);
   }
 
   // ---------- attributes ----------
   private _addAttributeItem(): void {
     if (!this._config || !this.hass) return;
     const list = [...this._attributes, { value: '' }];
-    this._config = { ...this._config, attributes: list };
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('attributes', list);
   }
 
   private _removeAttributeItem(index: number): void {
     if (!this._config || !this.hass) return;
     const list = [...this._attributes];
     list.splice(index, 1);
-    const cfg = { ...this._config };
-    if (list.length === 0) {
-      delete cfg.attributes;
-    } else {
-      cfg.attributes = list;
-    }
-    this._config = cfg;
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('attributes', list.length > 0 ? list : undefined);
   }
 
   private _updateAttributeItem(index: number, field: string, value: string): void {
@@ -1581,8 +1950,43 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       }
       return updated as AttributeConfig;
     });
-    this._config = { ...this._config, attributes: list };
-    fireEvent(this, 'config-changed', { config: this._config });
+    this.writeEntityField('attributes', list);
+  }
+
+  // ---------- attributes 的值映射（属性值替换） ----------
+  private _addAttributeStateMapItem(attrIndex: number): void {
+    if (!this._config || !this.hass) return;
+    const list = this._attributes.map((item, i) => {
+      if (i !== attrIndex) return item;
+      return { ...item, state_map: [...(item.state_map ?? []), { value: '', replacement: '' }] };
+    });
+    this.writeEntityField('attributes', list);
+  }
+
+  private _removeAttributeStateMapItem(attrIndex: number, mapIndex: number): void {
+    if (!this._config || !this.hass) return;
+    const list = this._attributes.map((item, i) => {
+      if (i !== attrIndex) return item;
+      const maps = (item.state_map ?? []).filter((_, mi) => mi !== mapIndex);
+      const updated: any = { ...item };
+      if (maps.length > 0) {
+        updated.state_map = maps;
+      } else {
+        delete updated.state_map;
+      }
+      return updated as AttributeConfig;
+    });
+    this.writeEntityField('attributes', list);
+  }
+
+  private _updateAttributeStateMapItem(attrIndex: number, mapIndex: number, field: string, value: string): void {
+    if (!this._config || !this.hass) return;
+    const list = this._attributes.map((item, i) => {
+      if (i !== attrIndex) return item;
+      const maps = (item.state_map ?? []).map((m, mi) => (mi === mapIndex ? { ...m, [field]: value } : m));
+      return { ...item, state_map: maps } as AttributeConfig;
+    });
+    this.writeEntityField('attributes', list);
   }
 
   // ---------- separator_style ----------
@@ -1784,12 +2188,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         border-radius: 0 0 8px 8px;
         background: var(--card-background-color, transparent);
       }
-      ha-select,
-      ha-textfield,
-      ha-textarea {
-        margin-bottom: 1rem;
-        display: block;
-      }
       ha-formfield {
         display: block;
         margin-inline: 0.5rem;
@@ -1797,9 +2195,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       }
       ha-switch {
         --mdc-theme-secondary: var(--switch-checked-color);
-      }
-      .note {
-        font-weight: bold;
       }
       .version {
         font-size: 0.75rem;
@@ -1822,6 +2217,28 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       }
       .list-row .full {
         grid-column: 1 / -1;
+      }
+      /* 属性值映射区块：在属性行下方缩进展示 */
+      .attr-map-block {
+        margin: -0.25rem 0 0.75rem 1.25rem;
+      }
+      /* 多实体：实体列表行 */
+      .entity-row.active {
+        border-color: var(--primary-color);
+      }
+      .entity-row-index {
+        position: absolute;
+        top: -10px;
+        left: 12px;
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
+        border-radius: 999px;
+        min-width: 20px;
+        height: 20px;
+        line-height: 20px;
+        text-align: center;
+        font-size: 0.75rem;
+        padding: 0 4px;
       }
       /* HA 原生图标选择器：与行内其他字段对齐 */
       .list-row ha-icon-picker.icon-picker {
@@ -1954,8 +2371,7 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         color: var(--primary-color);
       }
       .field input,
-      .field textarea,
-      .style-size {
+      .field textarea {
         width: 100%;
         padding: 0.55rem 0.7rem;
         border: 1px solid var(--divider-color);
@@ -1971,7 +2387,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
       }
       .field input:focus,
       .field textarea:focus,
-      .style-size:focus,
       select.native-select:focus {
         outline: none;
         border-color: var(--primary-color);
@@ -2039,6 +2454,13 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         font-size: 0.8rem;
         margin: 0 0 0.75rem;
       }
+      .sub-hint {
+        font-size: 0.75rem;
+        color: var(--secondary-text-color);
+        margin: 0.75rem 0.5rem 0;
+        padding-top: 0.5rem;
+        border-top: 1px dashed var(--divider-color);
+      }
       .style-row {
         display: grid;
         grid-template-columns: minmax(6.5rem, auto) 3rem 1fr 2rem;
@@ -2062,10 +2484,6 @@ export class LogbookCardEditor extends LitElement implements LovelaceCardEditor 
         flex-direction: column;
         font-size: 0.9rem;
         line-height: 1.3;
-      }
-      .style-default {
-        font-size: 0.7rem;
-        color: var(--secondary-text-color);
       }
       .style-color {
         width: 3rem;

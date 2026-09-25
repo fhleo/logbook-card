@@ -9,8 +9,9 @@ export interface ExtendedHomeAssistant extends HomeAssistant {
   formatEntityAttributeName(stateObj: HassEntity, attribute: string): string;
 }
 
-/** 可排序的条目元素 */
-export type LayoutElementKey = 'state' | 'duration' | 'attributes' | 'time';
+/** 可排序的条目元素（attributes:N 为第 N 个属性的独立布局键，v0.5.3+） */
+// 注：不使用 `attributes:${number}` 模板字面量类型，旧版 eslint 解析器不支持
+export type LayoutElementKey = 'state' | 'duration' | 'attributes' | 'time' | (string & Record<never, never>);
 
 /** 单个元素的行位置（v0.1.5/0.1.6 旧格式） */
 export interface LayoutItemPosition {
@@ -23,6 +24,8 @@ export interface LayoutItemPosition {
  * - 新格式（v0.1.7+）：order 为全局显示顺序，line_breaks 中的元素之后另起一行，
  *   align（v0.4.0+）声明靠右的元素（未声明的靠左）
  * - 旧格式：按元素的 row/order 数字（仍兼容读取）
+ * - attributes:N（v0.5.3+）：第 N 个属性独立布局；使用任一 attributes:N 时
+ *   未列出的属性跟在最后一个属性之后
  */
 export interface LayoutConfiguration {
   order?: LayoutElementKey[];
@@ -51,6 +54,8 @@ export interface ElementStylesConfiguration {
 export interface LogbookCardConfigBase extends LovelaceCardConfig {
   title?: string;
   show_title?: boolean;
+  /** 实体列表：渲染层据此判断是否显示实体名（多于 1 个实体时显示） */
+  entities?: EntityCardConfig[];
   history?: number;
   hours_to_show?: number;
   collapse?: number;
@@ -82,13 +87,13 @@ export interface EntityCardConfig {
   custom_logs?: boolean;
   custom_log_map?: Array<CustomLogMapConfig>;
   show_history?: boolean;
+  /** 实体级外观覆盖（未配置的字段回退到卡片全局配置） */
+  show?: ShowConfiguration;
+  layout?: LayoutConfiguration;
+  element_styles?: ElementStylesConfiguration;
 }
 
 export interface LogbookCardConfig extends LogbookCardConfigBase, EntityCardConfig {}
-
-export interface MultipleLogbookCardConfig extends LogbookCardConfigBase {
-  entities?: EntityCardConfig[];
-}
 
 export interface HiddenConfig {
   state?: string;
@@ -174,8 +179,15 @@ export interface ShowConfiguration {
   end_date: boolean;
   icon: boolean;
   separator: boolean;
-  time: boolean;
-  entity_name: true;
+  /** @deprecated v0.5.3 起废弃：时间显示由日期格式决定 */
+  time?: boolean;
+  entity_name: boolean;
+}
+
+/** 属性值映射：原始值（支持通配符）匹配时显示替换值 */
+export interface AttributeStateMap {
+  value?: string;
+  replacement?: string;
 }
 
 export interface AttributeConfig {
@@ -183,6 +195,8 @@ export interface AttributeConfig {
   label?: string;
   type?: 'date' | 'url';
   link_label?: string;
+  /** 属性值映射（v0.5.4+）：仅对普通值属性生效（date/url 类型不参与映射） */
+  state_map?: Array<AttributeStateMap>;
 }
 
 export interface History {

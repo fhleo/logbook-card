@@ -2,11 +2,12 @@ import { CSSResultGroup, LitElement, TemplateResult, css, html } from 'lit';
 import {
   CustomLogEvent,
   ExtendedHomeAssistant,
+  LogbookCardConfig,
   LogbookCardConfigBase,
-  Attribute,
   History,
   HistoryOrCustomLogEvent,
   LayoutElementKey,
+  ShowConfiguration,
 } from './types';
 import { layoutRows } from './layout';
 import { property } from 'lit/decorators.js';
@@ -14,15 +15,18 @@ import { handleAction, ActionHandlerEvent, hasAction } from 'custom-card-helpers
 import { actionHandler } from './action-handler-directive';
 import { styleMap, StyleInfo } from 'lit/directives/style-map.js';
 import { isSameDay } from './date-helpers';
-import { displayTime } from './formatter';
 import { HassEntity } from 'home-assistant-js-websocket/dist/types';
 
 export abstract class LogbookBaseCard extends LitElement {
   @property({ attribute: false }) public hass!: ExtendedHomeAssistant;
 
-  protected mode: 'multiple' | 'single' = 'single';
   private updateHistoryIntervalId: NodeJS.Timeout | null = null;
   private UPDATE_INTERVAL = 5000;
+
+  /** 多实体（entities 多于 1 个实体）且开启显示实体名时，在每条记录前显示实体名 */
+  protected showEntityName(config: LogbookCardConfigBase): boolean {
+    return config.show?.entity_name === true && (config.entities?.length ?? 0) > 1;
+  }
 
   protected _handleAction(ev: ActionHandlerEvent): void {
     if (this.hass && ev.detail.action && !!ev.target && ev.target['entity']) {
@@ -120,46 +124,78 @@ export abstract class LogbookBaseCard extends LitElement {
     return info;
   }
 
+  /** 条目所属实体的配置：实体级外观（show/layout/element_styles）覆盖卡片全局配置 */
+  protected itemConfig(item: History | CustomLogEvent, config: LogbookCardConfigBase): LogbookCardConfigBase {
+    const cfg = config as LogbookCardConfig;
+    const entityId =
+      item instanceof Object && 'stateObj' in item ? item.stateObj?.entity_id : (item as CustomLogEvent).entity;
+    const entityCfg = cfg.entities?.find(e => e.entity && e.entity === entityId);
+    if (!entityCfg) {
+      return config;
+    }
+    const hasShow = entityCfg.show && Object.keys(entityCfg.show).length > 0;
+    const hasStyles = entityCfg.element_styles && Object.keys(entityCfg.element_styles).length > 0;
+    if (!hasShow && !entityCfg.layout && !hasStyles) {
+      return config;
+    }
+    return {
+      ...config,
+      show: hasShow ? ({ ...(config.show ?? {}), ...entityCfg.show } as ShowConfiguration) : config.show,
+      layout: entityCfg.layout ?? config.layout,
+      element_styles: hasStyles
+        ? { ...(config.element_styles ?? {}), ...entityCfg.element_styles }
+        : config.element_styles,
+    };
+  }
+
   protected renderHistoryItem(item: History, isLast: boolean, config: LogbookCardConfigBase): TemplateResult {
+    // 条目所属实体覆盖外观配置（show/layout/element_styles）
+    const itemConf = this.itemConfig(item, config);
     // 各元素的显示模板（未开启/无内容的元素不会加入）
     const tpls = new Map<LayoutElementKey, TemplateResult>();
-    if (config?.show?.state) {
+    if (itemConf?.show?.state) {
       tpls.set(
         'state',
         html`
-          <span class="state" style=${styleMap(this.elementStyleInfo(config, 'state'))}>${item.label}</span>
+          <span class="state" style=${styleMap(this.elementStyleInfo(itemConf, 'state'))}>${item.label}</span>
         `,
       );
     }
-    if (config?.show?.duration) {
+    if (itemConf?.show?.duration) {
       tpls.set(
         'duration',
         html`
-          <span class="duration" style=${styleMap(this.elementStyleInfo(config, 'duration'))}>
-            <logbook-duration .hass="${this.hass}" .config="${config}" .duration="${item.duration}"> </logbook-duration>
+          <span class="duration" style=${styleMap(this.elementStyleInfo(itemConf, 'duration'))}>
+            <logbook-duration .hass="${this.hass}" .config="${itemConf}" .duration="${item.duration}">
+            </logbook-duration>
           </span>
         `,
       );
     }
-    const attributes = item.attributes?.map(attr => this.renderAttributes(attr, config));
-    if (attributes?.length) {
+    // 每个属性作为独立布局元素（attributes:N），未配置布局时属性们同行依次排列
+    (item.attributes ?? []).forEach((attr, i) => {
       tpls.set(
-        'attributes',
+        `attributes:${i}`,
         html`
-          ${attributes}
+          <div class="attribute" style=${styleMap(this.elementStyleInfo(itemConf, 'attributes'))}>
+            ${itemConf?.attribute_hide_label
+              ? ''
+              : html`
+                  <div class="key">${attr.name}</div>
+                `}
+            <div class="value">${attr.value}</div>
+          </div>
         `,
       );
+    });
+    if (itemConf?.show?.start_date || itemConf?.show?.end_date) {
+      tpls.set('time', this.renderHistoryDate(item, itemConf));
     }
-    const showTime = config?.show?.time !== false;
-    if (config?.show?.start_date || config?.show?.end_date || showTime) {
-      tpls.set('time', this.renderHistoryDate(item, config));
-    }
+    const entityTpl = this.showEntityName(itemConf)
+      ? this.renderEntity(item.stateObj.entity_id, item.entity_name, config)
+      : undefined;
     // 按行分组渲染：每行分左组与右组（右组靠行尾对齐）
-    const layoutPlan = layoutRows(config?.layout);
-    const entityTpl =
-      this.mode === 'multiple' && config.show?.entity_name
-        ? this.renderEntity(item.stateObj.entity_id, item.entity_name, config)
-        : undefined;
+    const layoutPlan = layoutRows(itemConf?.layout, item.attributes?.length ?? 0);
     const rows = layoutPlan
       .map(row => {
         const renderKey = (key: LayoutElementKey): TemplateResult[] => {
@@ -189,12 +225,12 @@ export abstract class LogbookBaseCard extends LitElement {
       .filter(Boolean);
     return html`
       <div class="item history">
-        ${this.renderHistoryIcon(item, config)}
+        ${this.renderHistoryIcon(item, itemConf)}
         <div class="item-content">
           ${rows}
         </div>
       </div>
-      ${!isLast ? this.renderSeparator(config) : ``}
+      ${!isLast ? this.renderSeparator(itemConf) : ``}
     `;
   }
 
@@ -203,22 +239,23 @@ export abstract class LogbookBaseCard extends LitElement {
     isLast: boolean,
     config: LogbookCardConfigBase,
   ): TemplateResult {
+    const itemConf = this.itemConfig(customLogEvent, config);
     return html`
       <div class="item custom-log">
-        ${this.renderCustomLogIcon(customLogEvent, config)}
+        ${this.renderCustomLogIcon(customLogEvent, itemConf)}
         <div class="item-content">
-          ${this.mode === 'multiple' && config.show?.entity_name
+          ${this.showEntityName(itemConf)
             ? this.renderEntity(customLogEvent.entity, customLogEvent.entity_name, config)
             : ''}
           <span class="custom-log__name">${customLogEvent.name}</span>
           <span class="custom-log__separator">-</span>
           <span class="custom-log__message">${customLogEvent.message}</span>
           <div class="date">
-            <logbook-date .hass=${this.hass} .date=${customLogEvent.start} .config=${config}></logbook-date>
+            <logbook-date .hass=${this.hass} .date=${customLogEvent.start} .config=${itemConf}></logbook-date>
           </div>
         </div>
       </div>
-      ${!isLast ? this.renderSeparator(config) : ``}
+      ${!isLast ? this.renderSeparator(itemConf) : ``}
     `;
   }
 
@@ -290,24 +327,6 @@ export abstract class LogbookBaseCard extends LitElement {
     `;
   }
 
-  protected renderAttributes(attribute: Attribute, config: LogbookCardConfigBase): TemplateResult {
-    const attrStyle = styleMap(this.elementStyleInfo(config, 'attributes'));
-    if (config.attribute_hide_label) {
-      // 隐藏标签时，值显示在标签位置（左侧）
-      return html`
-        <div class="attribute" style=${attrStyle}>
-          <div class="value">${attribute.value}</div>
-        </div>
-      `;
-    }
-    return html`
-      <div class="attribute" style=${attrStyle}>
-        <div class="key">${attribute.name}</div>
-        <div class="value">${attribute.value}</div>
-      </div>
-    `;
-  }
-
   renderHistoryDate(item: History, config: LogbookCardConfigBase): TemplateResult {
     const dateStyle = styleMap(this.elementStyleInfo(config, 'time'));
     if (config?.show?.start_date && config?.show?.end_date) {
@@ -332,12 +351,7 @@ export abstract class LogbookBaseCard extends LitElement {
         </div>
       `;
     }
-    // 开始/结束日期都关闭但开启了显示时间时，仅显示开始时间
-    if (config?.show?.time !== false) {
-      return html`
-        <div class="date" style=${dateStyle}>${displayTime(this.hass, item.start, config.date_format)}</div>
-      `;
-    }
+    // 开始/结束日期都关闭时不显示时间（时间仅影响日期的显示格式）
     return html``;
   }
 
@@ -345,7 +359,6 @@ export abstract class LogbookBaseCard extends LitElement {
     return css`
       .copy {
         user-select: text;
-        background-color: red;
       }
       ha-card {
         overflow: clip;
